@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 Erikxson
 
 
-// tools/sniffer/main.cpp
+// tools/sniffer-433/src/main.cpp
 /*
   ============================================================
   CC1101 OOK DIRECT SNIFFER + GUIDED LEARN + EXPORT (P_* ARRAYS)
@@ -77,13 +77,23 @@
 #include <RadioLib.h>
 
 // =====================================================
-// PIN CONFIG (ESP32 + CC1101)
+// PIN CONFIG (ESP32 or ESP8266 + CC1101)
 // =====================================================
-static constexpr int PIN_SCK  = 18;
-static constexpr int PIN_MISO = 19;
-static constexpr int PIN_MOSI = 23;
-static constexpr int PIN_CS   = 5;
-static constexpr int PIN_GDO0 = 4;
+// Same GPIO map as the main TX+MQTT firmware (src/radio/radio_tx.cpp), for
+// consistency - see README "Wiring (ESP8266)" for the boot-pin caveats.
+#if defined(ARDUINO_ARCH_ESP8266)
+  static constexpr int PIN_SCK  = 14; // D5 (fixed HW SPI pin)
+  static constexpr int PIN_MISO = 12; // D6 (fixed HW SPI pin)
+  static constexpr int PIN_MOSI = 13; // D7 (fixed HW SPI pin)
+  static constexpr int PIN_CS   = 15; // D8
+  static constexpr int PIN_GDO0 = 5;  // D1 (interrupt-capable, no boot constraints)
+#else
+  static constexpr int PIN_SCK  = 18;
+  static constexpr int PIN_MISO = 19;
+  static constexpr int PIN_MOSI = 23;
+  static constexpr int PIN_CS   = 5;
+  static constexpr int PIN_GDO0 = 4;
+#endif
 
 // =====================================================
 // RADIO PARAMETERS
@@ -112,7 +122,23 @@ static constexpr uint32_t DBG_EVERY_MS  = 1000;
 // =====================================================
 // BUFFERS / CAP LIMITS
 // =====================================================
-static constexpr uint16_t MAX_EDGES      = 8192;
+// g_edges[] and g_copy[] are both int32_t[MAX_EDGES], i.e. 2 * 4 * MAX_EDGES
+// bytes of *static* RAM (allocated at link time, not from the heap). ESP32
+// has plenty of headroom for the original 8192 (64 KB total for both
+// buffers). ESP8266 only has ~80 KB of DRAM total for the whole firmware
+// (core + SDK static data + these buffers + heap + stack), so the original
+// size would very likely fail to link ("region `dram0_0_seg' overflowed") or
+// leave the device unstable even if it did link. 2048 edges (16 KB total)
+// still comfortably covers many repeats of a single button press within one
+// capture session - if a session somehow fills the buffer anyway, the
+// existing bufferFull logic below already ends the session early and
+// processes what was captured (logged as "[FORCED]"), so this degrades
+// gracefully rather than losing data silently.
+#if defined(ARDUINO_ARCH_ESP8266)
+  static constexpr uint16_t MAX_EDGES      = 2048;
+#else
+  static constexpr uint16_t MAX_EDGES      = 8192;
+#endif
 static constexpr uint16_t MAX_FRAME_CAP  = 200;   // capPulse dimension
 
 // =====================================================
@@ -577,7 +603,13 @@ void setup() {
   Serial.println("Only for equipment you own / have permission to test.");
   Serial.printf("FREQ: %.2f MHz (OOK)\n", RF_FREQ_MHZ);
 
+#if defined(ARDUINO_ARCH_ESP8266)
+  // ESP8266's SPIClass::begin() takes no arguments - HW SPI pins are fixed
+  // (see PIN_SCK/MISO/MOSI above). CS is a plain GPIO driven by RadioLib.
+  SPI.begin();
+#else
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
+#endif
 
   int16_t state = radio.begin(RF_FREQ_MHZ, BITRATE_KBPS, FREQDEV_KHZ, RX_BW_KHZ, 10, 16);
   if (state != RADIOLIB_ERR_NONE) {
