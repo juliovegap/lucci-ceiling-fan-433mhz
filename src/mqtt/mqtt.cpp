@@ -6,16 +6,9 @@
 #include <strings.h>  // strcasecmp
 #include <stdlib.h>
 
-static HaMqtt* g_self = nullptr;
+#include "radio/tx_power.h"
 
-static bool isAllowedTxPwr(int8_t p) {
-  switch (p) {
-    case -30: case -20: case -15: case -10: case 0: case 5: case 7: case 10:
-      return true;
-    default:
-      return false;
-  }
-}
+static HaMqtt* g_self = nullptr;
 
 void HaMqtt::begin(
   const char* wifiSsid,
@@ -143,6 +136,10 @@ void HaMqtt::wifiEnsure_() {
 void HaMqtt::mqttEnsure_() {
   if (!WiFi.isConnected()) return;
   if (mqtt_.connected()) return;
+
+  uint32_t now = millis();
+  if (now - lastMqttTryMs_ < MQTT_RETRY_MS) return;
+  lastMqttTryMs_ = now;
 
   Serial.print("MQTT: connecting... ");
 

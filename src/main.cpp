@@ -2,7 +2,12 @@
 // Copyright (c) 2025-2026 Erikxson
 
 #include <Arduino.h>
-#include <WiFi.h>
+
+#if defined(ARDUINO_ARCH_ESP8266)
+  #include <ESP8266WiFi.h>
+#else
+  #include <WiFi.h>
+#endif
 
 #include "credentials.h"
 #include "device_config.h"

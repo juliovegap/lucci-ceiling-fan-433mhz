@@ -1,9 +1,10 @@
-# Lucci Ceiling Fan (433 MHz) — ESP32 + CC1101 (OOK) Sniffer + Guided Learn + Pattern Export + TX
+# Lucci Ceiling Fan (433 MHz) — ESP32/ESP8266 + CC1101 (OOK) Sniffer + Guided Learn + Pattern Export + TX
 
-Sniff and replay **433 MHz OOK** commands from a Lucci ceiling fan remote using an **ESP32 + CC1101**.  
+Sniff and replay **433 MHz OOK** commands from a Lucci ceiling fan remote using an **ESP32 or ESP8266 + CC1101**.
+The **sniffer** (pattern capture tool) is ESP32-only for now; the **main TX + MQTT firmware** runs on either board.
 The workflow is:
 
-1) **Sniffer (tools/sniffer)** learns which button is which (guided) and exports clean timing arrays (`P_*`).  
+1) **Sniffer (tools/sniffer-433)** learns which button is which (guided) and exports clean timing arrays (`P_*`).  
 2) **TX (main firmware)** replays those patterns using **CC1101 direct OOK transmit**.
 
 ---
@@ -11,7 +12,7 @@ The workflow is:
 
 ## What this repository contains
 
-- **Sniffer firmware** (guided learn + export): `tools/sniffer/`
+- **Sniffer firmware** (guided learn + export): `tools/sniffer-433/`
 - **Main firmware** (TX + your app logic): repo root `src/`
 - **TX module**:
   - `radio/radio_tx.h`
@@ -35,7 +36,13 @@ This project is licensed under **GNU GPL v3 (or later)**.
 
 # Hardware
 
-- ESP32 dev board
+**Main firmware (TX + MQTT)** — pick one board:
+- ESP32 dev board (e.g. `esp32dev`), **or**
+- ESP8266 dev board (tested pinout: Nodemcu)
+
+**Sniffer** (pattern capture tool, `tools/sniffer-433/`) — **ESP32 only** for now. It uses `attachInterrupt()` on GDO0 plus a fairly memory-heavy edge-capture buffer; it hasn't been ported/tested on ESP8266. If you need to sniff a remote and only have an ESP8266 on hand, borrow/buy an ESP32 for that one-time step — you only need it during the sniff + export phase, not for day-to-day operation.
+
+Both boards need:
 - CC1101 module for **433 MHz**
 - Antenna tuned for 433 MHz
 - Stable 3.3V power (**CC1101 is 3.3V only**)
@@ -63,10 +70,31 @@ Notes:
 
 ---
 
+## Wiring (ESP8266 ↔ CC1101) — main firmware only
+
+ESP8266's hardware SPI pins are **fixed by the SDK** (unlike ESP32, where `SPI.begin()` can remap them), so the map is necessarily different:
+
+| CC1101 | ESP8266 GPIO | Nodemcu pin | Notes |
+|---|---|---|---|
+| GND  | GND | GND | common ground |
+| VCC  | 3V3 | 3V3 | **3.3V only**⚠️ |
+| GDO0 | 5   | D1  | data pin (TX direct); free GPIO, no boot constraints |
+| CSN  | 15  | D8  | SPI chip select — boot requires this pin LOW, which matches an idle CS line, but see caveat below |
+| SCK  | 14  | D5  | SPI clock — fixed HW SPI pin |
+| MOSI | 13  | D7  | SPI MOSI — fixed HW SPI pin |
+| MISO | 12  | D6  | SPI MISO — fixed HW SPI pin |
+| GDO2 | not connected | — | unused |
+
+⚠️ **GPIO15/D8 boot caveat:** ESP8266 requires GPIO15 to be LOW at boot for normal flash-boot mode (most Nodemcu boards have a built-in pulldown on D8 to guarantee this). That happens to match CC1101's idle-selected state, so it's electrically fine in practice — but avoid adding your own pull-*up* on that line, and avoid reusing D8 for anything else on the same board.
+
+Avoid GPIO0/2/16 (D3/D4/D0) for CS/GDO0-type roles — they're either boot-strapping pins or, for GPIO16, lack interrupt/normal I/O behavior.
+
+---
+
 # Build & Flash (PlatformIO)
 
 This repo has **two** PlatformIO projects:
-- **Sniffer:** `tools/sniffer/`
+- **Sniffer:** `tools/sniffer-433/`
 - **Main firmware:** repo root
 
 You can build from VS Code (PlatformIO) or CLI.
@@ -78,45 +106,56 @@ You can build from VS Code (PlatformIO) or CLI.
 1) Install **VS Code** + **PlatformIO**
 2) Open the repo folder in VS Code
 3) In PlatformIO sidebar:
-   - For sniffer: switch to `tools/sniffer` project (open that folder) and **Build/Upload/Monitor**
+   - For sniffer: switch to `tools/sniffer-433` project (open that folder) and **Build/Upload/Monitor**
    - For main firmware: open repo root and **Build/Upload/Monitor**
 
 ---
 
 ## Option B: Build via CLI
 
-### 1) Sniffer (tools/sniffer)
+### 1) Sniffer (tools/sniffer-433)
 
 Build:
 ```bash
-pio run -d tools/sniffer
+pio run -d tools/sniffer-433
 ```
 
 Upload:
 ```bash
-pio run -d tools/sniffer -t upload
+pio run -d tools/sniffer-433 -t upload
 ```
 
 Monitor:
 ```bash
-pio device monitor -d tools/sniffer -b 115200
+pio device monitor -d tools/sniffer-433 -b 115200
 ```
 
 ### 2) Main firmware (repo root)
 
-Build:
+The root `platformio.ini` now defines **two** environments — `esp32dev` and `nodemcu` (ESP8266). A bare `pio run` builds/uploads **both** in turn, since PlatformIO does that whenever a project has more than one `[env:...]` section. To target just one board, pass `-e`:
+
+Build (ESP32):
 ```bash
-pio run
+pio run -e esp32dev
+```
+
+Build (ESP8266):
+```bash
+pio run -e nodemcu
 ```
 
 Upload:
 ```bash
-pio run -t upload
+pio run -e esp32dev -t upload
+# or
+pio run -e nodemcu -t upload
 ```
 
 Monitor:
 ```bash
-pio device monitor -b 115200
+pio device monitor -e esp32dev -b 115200
+# or
+pio device monitor -e nodemcu -b 115200
 ```
 
 ---
@@ -133,7 +172,7 @@ If your build requires WiFi/MQTT credentials:
 
 ---
 
-# Sniffer: Guided Learn + Export (tools/sniffer)
+# Sniffer: Guided Learn + Export (tools/sniffer-433)
 
 ## Recommended remote distance (sniffing)
 
@@ -210,7 +249,7 @@ All control is **single keypress** in Serial Monitor.
 
 # Exporting patterns/patterns.h
 
-1) Flash and run the sniffer (`tools/sniffer`)
+1) Flash and run the sniffer (`tools/sniffer-433`)
 2) Complete Guided Learn (all 8 buttons learned)
 3) Press each button until it becomes captured
 4) Press `x` until all commands show `OK`
@@ -238,6 +277,8 @@ Runtime knobs:
 - repeat: 1..12 (default 6)
 - gap: 1000..30000 µs (default 10000 µs)
 - invert: false/true (default false)
+
+**Bit-banged timing note:** the waveform is generated by toggling GDO0 with `delayMicroseconds()` in a plain loop — there's no hardware timer or DMA involved, on either chip. This is normally fine, but it does mean the loop can, in principle, be delayed by a few microseconds if a WiFi/TCP interrupt fires mid-frame; most OOK decoders tolerate that. Between repeats (never mid-frame) the code now calls `yield()` so the WiFi stack and watchdog get serviced on a high repeat-count + long-gap TX — see "Known limitations" below.
 
 ## Rotation, sync, and startup behavior
 
@@ -320,6 +361,16 @@ If the fan does not react:
 - Try inversion
 - Increase repeats
 - Confirm `patterns.h` matches your specific remote
+
+---
+
+# Known limitations
+
+- **Sniffer is ESP32-only.** `tools/sniffer-433/` hasn't been ported to ESP8266. Use an ESP32 for the one-time sniff/export step even if your permanent install is an ESP8266.
+- **ESP8266 EEPROM has no wear leveling.** `FanStateStore` on ESP8266 uses the `EEPROM` library, which erases/rewrites its whole flash sector on every `commit()`. Normal use (occasional speed/power/direction changes) is a non-issue over a device's lifetime, but a script or automation that repeatedly hammers the MQTT tuning topics (`tune/tx_repeat/set`, etc.) could wear that sector out faster than expected. ESP32's `Preferences`/NVS backend doesn't have this limitation. If it matters for your setup, consider swapping in a wear-leveled EEPROM library (e.g. `ESP_EEPROM`) as a drop-in replacement inside `fan_state.cpp`.
+- **MQTT reconnect throttle:** fixed in this version — `mqttEnsure_()` previously had no rate limit at all (unlike the WiFi reconnect path just above it in the same file), so a broker that actively refused connections could be hammered on every `loop()` iteration. It's now throttled to one attempt per 5s, matching the existing WiFi throttle.
+- **Duplicated TX-power validation:** fixed in this version — the `-30/-20/-15/-10/0/5/7/10 dBm` allow-list used to be copy-pasted identically into `radio_tx.cpp`, `fan_state.cpp` and `mqtt.cpp`. It's now a single `inline` function in `src/radio/tx_power.h` that all three include, so the three call sites can no longer drift out of sync.
+- **No OTA.** Both boards are still flashed over USB only. Worth adding (`ArduinoOTA`) if the device ends up mounted somewhere inconvenient to reach, like inside a ceiling fan canopy.
 
 ---
 

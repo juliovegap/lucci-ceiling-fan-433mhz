@@ -8,13 +8,27 @@
 #include <pgmspace.h>
 
 #include "patterns/patterns.h" // måste ge P_OFF..P_ROTATION + *_LEN
+#include "tx_power.h"
 
 // PIN + RF params
-static constexpr int PIN_SCK  = 18;
-static constexpr int PIN_MISO = 19;
-static constexpr int PIN_MOSI = 23;
-static constexpr int PIN_CS   = 5;
-static constexpr int PIN_GDO0 = 4;
+//
+// ESP8266's hardware SPI pins are fixed by the SDK (SCK=GPIO14, MISO=GPIO12,
+// MOSI=GPIO13), unlike ESP32 where SPI.begin() can remap them. CS/GDO0 are
+// plain GPIOs picked to avoid the flash pins (GPIO6-11) and the boot-strapping
+// pins (GPIO0/2). See README "Wiring (ESP8266)" for the full table.
+#if defined(ARDUINO_ARCH_ESP8266)
+  static constexpr int PIN_SCK  = 14; // D5 (fixed HW SPI pin)
+  static constexpr int PIN_MISO = 12; // D6 (fixed HW SPI pin)
+  static constexpr int PIN_MOSI = 13; // D7 (fixed HW SPI pin)
+  static constexpr int PIN_CS   = 15; // D8 (boot: must be LOW - fine for an idle-low-at-reset CS line)
+  static constexpr int PIN_GDO0 = 5;  // D1 (free GPIO, no boot constraints)
+#else
+  static constexpr int PIN_SCK  = 18;
+  static constexpr int PIN_MISO = 19;
+  static constexpr int PIN_MOSI = 23;
+  static constexpr int PIN_CS   = 5;
+  static constexpr int PIN_GDO0 = 4;
+#endif
 
 static constexpr float RF_FREQ_MHZ   = 434.05f;
 static constexpr float RX_BW_KHZ     = 135.0f;
@@ -22,15 +36,6 @@ static constexpr float BITRATE_KBPS  = 4.8f;
 static constexpr float FREQDEV_KHZ   = 5.0f;
 
 static CC1101 radio = new Module(PIN_CS, PIN_GDO0, RADIOLIB_NC, RADIOLIB_NC);
-
-static inline bool isAllowedTxPwr(int8_t p) {
-  switch (p) {
-    case -30: case -20: case -15: case -10: case 0: case 5: case 7: case 10:
-      return true;
-    default:
-      return false;
-  }
-}
 
 static inline void writeLevel(bool high, bool invert) {
   if (invert) high = !high;
@@ -56,6 +61,13 @@ static void sendPatternPGM(const int16_t* pat, uint16_t len, uint8_t repeatN, ui
 
     writeLevel(false, invert);
     delayMicroseconds((uint16_t)gapUs);
+
+    // Give the WiFi/TCP stack (and the watchdog) a chance to run between
+    // repeats. This only happens during the already-idle inter-frame gap,
+    // so it never touches the waveform timing inside a frame. Matters most
+    // on ESP8266, where TX with a long pattern + high repeat + max gap can
+    // otherwise block the single core for the better part of a second.
+    yield();
   }
 
   writeLevel(false, invert);
@@ -90,7 +102,13 @@ static bool getPattern_(RadioTx::CmdId c, const int16_t*& pat, uint16_t& len) {
 }
 
 bool RadioTx::begin() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  // ESP8266's SPIClass::begin() takes no arguments - HW SPI pins are fixed
+  // (see PIN_SCK/MISO/MOSI above). CS is a plain GPIO driven by RadioLib.
+  SPI.begin();
+#else
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
+#endif
 
   int16_t state = radio.begin(RF_FREQ_MHZ, BITRATE_KBPS, FREQDEV_KHZ, RX_BW_KHZ, pwr_dbm_, 16);
   if (state != RADIOLIB_ERR_NONE) {

@@ -3,7 +3,13 @@
 
 #pragma once
 #include <Arduino.h>
-#include <WiFi.h>
+
+#if defined(ARDUINO_ARCH_ESP8266)
+  #include <ESP8266WiFi.h>
+#else
+  #include <WiFi.h>
+#endif
+
 #include <PubSubClient.h>
 
 enum class MqttCmdType : uint8_t {
@@ -172,6 +178,13 @@ private:
   const char* swVer_ = nullptr;
 
   uint32_t lastWifiTryMs_ = 0;
+
+  // Bug fix: mqttEnsure_() used to be called from loop() with no rate limit
+  // at all (unlike wifiEnsure_(), just below, which already throttles WiFi
+  // reconnect attempts). If the broker actively refused connections this
+  // turned into a tight reconnect loop. Mirrors the existing WiFi throttle.
+  static constexpr uint32_t MQTT_RETRY_MS = 5000;
+  uint32_t lastMqttTryMs_ = 0;
 
   void initTopics_();
   void wifiEnsure_();
