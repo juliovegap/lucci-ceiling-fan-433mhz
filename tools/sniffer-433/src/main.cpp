@@ -90,6 +90,28 @@ static constexpr uint8_t MIN_REPEATS = 2;
 // Similar timing tolerance when comparing repetitions.
 static constexpr uint8_t MAX_BAD_SYMBOLS = 3;
 
+// -----------------------------------------------------
+// Capture trigger validation
+// -----------------------------------------------------
+// Do NOT start a capture just because several RF edges
+// arrive. In idle, interference can easily create many
+// edges. We only enter the capture state after finding
+// the protocol's long sync gap followed by a sufficiently
+// long, valid Manchester-like symbol sequence.
+//
+// The real remote frame observed here is 29 bits, so 16
+// valid bits is deliberately conservative while still
+// leaving some tolerance for a partial frame.
+static constexpr uint8_t START_MIN_BITS = 16;
+
+// Only inspect the most recent part of the pre-trigger
+// buffer. This avoids repeatedly scanning a growing noise
+// buffer while the receiver is idle.
+static constexpr uint16_t START_SCAN_EDGES = 512;
+
+// Once a valid protocol frame has been detected, keep
+// capturing until this much silence is observed.
+
 // =====================================================
 // CAPTURE
 // =====================================================
@@ -1112,13 +1134,72 @@ void setup() {
 }
 
 // =====================================================
+// PROTOCOL START DETECTION
+// =====================================================
+//
+// A burst is considered real only when the captured edge
+// history already contains:
+//   SYNC (about 6.1 ms)
+//   + at least START_MIN_BITS valid Manchester-like bits
+//
+// This function is deliberately independent of RSSI.
+// RSSI is useful as information, but it is not a reliable
+// trigger because local 433 MHz interference can be strong.
+//
+// IMPORTANT:
+// This function is called while interrupts are disabled by
+// the caller, so the ISR cannot modify g_edges halfway
+// through the inspection.
+// =====================================================
+
+static bool hasValidProtocolStart(uint16_t count) {
+
+  if (count < 3) {
+    return false;
+  }
+
+  uint16_t first = 0;
+
+  if (count > START_SCAN_EDGES) {
+    first = count - START_SCAN_EDGES;
+  }
+
+  for (uint16_t i = first; i < count; i++) {
+
+    uint32_t us = abs(g_edges[i]);
+
+    if (
+      us < SYNC_MIN_US ||
+      us > SYNC_MAX_US
+    ) {
+      continue;
+    }
+
+    DecodedFrame frame =
+      decodeAfterSync(
+        (const int32_t*)g_edges,
+        count,
+        i
+      );
+
+    if (
+      frame.valid &&
+      frame.bits >= START_MIN_BITS
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// =====================================================
 // LOOP
 // =====================================================
 
 void loop() {
 
   static bool capturing = false;
-  static uint16_t previousCount = 0;
   static uint32_t captureStartUs = 0;
 
   uint32_t now = micros();
@@ -1136,27 +1217,57 @@ void loop() {
   interrupts();
 
   // ---------------------------------------------------
-  // Wait for a burst of edges.
-  // No RSSI gate.
+  // Wait for the actual protocol, not just RF activity.
+  //
+  // In idle there can be plenty of 433 MHz edges. The old
+  // implementation started a capture after only 8 edges,
+  // which made the sniffer "capture by itself".
+  //
+  // We now wait until the edge history contains a real
+  // Lucci-like sync gap followed by a valid symbol stream.
   // ---------------------------------------------------
 
   if (!capturing) {
 
-    uint16_t delta =
-      (count >= previousCount)
-        ? count - previousCount
-        : 0;
+    // If the idle buffer becomes full because of continuous
+    // interference, discard it and start looking again.
+    if (count >= MAX_EDGES - 1) {
 
-    previousCount = count;
+      noInterrupts();
 
-    if (delta >= 8) {
+      g_edgeCount = 0;
+      g_lastEdgeUs = micros();
+      g_overflow = false;
+
+      interrupts();
+
+      delay(1);
+      return;
+    }
+
+    bool protocolDetected = false;
+
+    // Protect the edge buffer while hasValidProtocolStart()
+    // inspects it. The scan is short (at most 512 edges).
+    noInterrupts();
+
+    uint16_t scanCount = g_edgeCount;
+
+    if (scanCount >= START_MIN_BITS * 2 + 1) {
+      protocolDetected =
+        hasValidProtocolStart(scanCount);
+    }
+
+    interrupts();
+
+    if (protocolDetected) {
 
       capturing = true;
       captureStartUs = now;
 
       Serial.printf(
-        "\nCAPTURE START edges=%u\n",
-        (unsigned)count
+        "\nCAPTURE START: protocol detected (edges=%u)\n",
+        (unsigned)scanCount
       );
     }
 
@@ -1199,8 +1310,6 @@ void loop() {
     copyCapture();
 
   capturing = false;
-  previousCount = 0;
-
   Serial.printf(
     "\nCAPTURE END edges=%u",
     (unsigned)g_copyCount
