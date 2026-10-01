@@ -1175,6 +1175,9 @@ static bool hasValidProtocolStart(uint16_t count) {
       continue;
     }
 
+    // g_edges is volatile because it is written from the ISR.
+    // decodeAfterSync() only reads the buffer, so explicitly cast
+    // away volatile for this read-only decoding pass.
     DecodedFrame frame =
       decodeAfterSync(
         (const int32_t*)g_edges,
